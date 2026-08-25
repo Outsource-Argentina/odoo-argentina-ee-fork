@@ -149,7 +149,7 @@ class L10nArDjArba(models.Model):
             return
 
         self = ddjj
-        env_type = self.company_id._get_arba_environment_type()
+        env_type = self.company_id._get_arba_ws_environment_type()
 
         if env_type == "demo":
             # Simular que nos conectamos y hacemos un comprobante dummy local
@@ -211,15 +211,21 @@ class L10nArDjArba(models.Model):
     def _ensure_dj(self, wh_date, company):
         """Encontrar la declaracion jurada que corresponde, que este en el mismo periodo de la retención.
 
+        Reusamos cualquier DDJJ existente del período (abierta o borrador) en lugar de crear una nueva.
+        Esto evita violar la constraint unique(company, period, state) y dejar borradores huérfanos cuando
+        un intento previo de abrir contra ARBA falló (ej. caída intermitente del webservice), lo que dejaba
+        al usuario bloqueado para informar cualquier retención de ese período.
+
         :return: DDJJ ARBA recordset of the matching DDJJ for the given period"""
         from_date, to_date = self._find_dates(wh_date)
         dj_arba = self.search(
             [
                 ("company_id", "=", company.id),
-                ("state", "=", "open"),
                 ("date", ">=", from_date),
                 ("date", "<=", to_date),
             ],
+            # Priorizamos una DDJJ ya abierta ('open') por sobre una en borrador ('draft')
+            order="state desc",
             limit=1,
         )
         if not dj_arba:
@@ -229,6 +235,7 @@ class L10nArDjArba(models.Model):
                     "date": wh_date,
                 }
             )
+        if dj_arba.state == "draft":
             dj_arba.action_open()
         return dj_arba
 
@@ -374,7 +381,7 @@ class L10nArDjArba(models.Model):
         }
         """
         self.ensure_one()
-        env_type = self.company_id._get_arba_environment_type()
+        env_type = self.company_id._get_arba_ws_environment_type()
         ok_msg = self.env._("The declaration was successfully opened")
 
         if env_type == "demo":
@@ -404,7 +411,12 @@ class L10nArDjArba(models.Model):
         )
         error_prefix = self.env._("Error opening the declaration: DDJJ ID number was not generated")
         if error:
-            self._process_arba_error(error, error_prefix)
+            # ARBA puede ya tener abierta la DDJJ del período (ej. un intento previo cuya respuesta se
+            # perdió por una caída intermitente del webservice). Intentamos recuperarla linkeando la DDJJ
+            # existente en ARBA en lugar de dejar el borrador colgado y bloquear el período.
+            self.action_find_existing()
+            if not self.name:
+                self._process_arba_error(error, error_prefix)
             return
 
         if response.get("id"):
@@ -423,7 +435,7 @@ class L10nArDjArba(models.Model):
             return
 
         ok_msg = self.env._("An existing DDJJ was successfully linked")
-        env_type = self.company_id._get_arba_environment_type()
+        env_type = self.company_id._get_arba_ws_environment_type()
         if env_type == "demo":
             # Simular que nos conectamos y hacemos la declaracion pero modo dummy local
             self.write(
@@ -495,7 +507,7 @@ class L10nArDjArba(models.Model):
         ]
         """
         self.ensure_one()
-        env_type = self.company_id._get_arba_environment_type()
+        env_type = self.company_id._get_arba_ws_environment_type()
         ok_msg = self.env._("The DDJJ's status has been updated")
         if env_type == "demo":
             # Simular que nos conectamos y hacemos la declaracion pero modo dummy local
